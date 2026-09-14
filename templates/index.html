@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>剪报连载接续工作台</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <h1>剪报连载接续工作台</h1>
+  <div class="actions">
+    <label class="btn primary">导入扫描图
+      <input id="fileInput" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp" multiple hidden>
+    </label>
+    <button id="undoBtn" class="btn">↩ 撤销</button>
+    <button id="analyzeBtn" class="btn primary">分析接续</button>
+    <button id="reviewAllBtn" class="btn">复核全部过期</button>
+    <a class="btn" href="/api/export" download>导出 JSON 索引</a>
+  </div>
+</header>
+
+<main class="layout">
+  <aside id="thumbsPanel">
+    <h2>扫描页库 <span id="pageCount" class="muted"></span></h2>
+    <p class="hint">点击缩略图查看并登记线索；「＋排序」放入排序区。同版次、同栏目名不会被当作相邻依据。</p>
+    <div id="thumbs"></div>
+  </aside>
+
+  <section id="readerPanel">
+    <div class="reader-toolbar">
+      <button class="btn small" data-zoom="in">＋放大</button>
+      <button class="btn small" data-zoom="out">－缩小</button>
+      <button class="btn small" data-zoom="fit">适应窗口</button>
+      <button class="btn small" data-zoom="reset">1:1</button>
+      <span class="hint">滚轮缩放，按住拖动平移</span>
+    </div>
+    <div id="readerWrap">
+      <svg id="readerSvg" xmlns="http://www.w3.org/2000/svg">
+        <g id="readerG"><image id="readerImg" href=""/></g>
+      </svg>
+      <div id="readerEmpty">尚未选择扫描页<br><span class="hint">从左侧页库点击缩略图</span></div>
+    </div>
+
+    <form id="clueForm">
+      <h3>线索登记 <span id="formTitle" class="muted"></span></h3>
+      <div class="form-grid">
+        <label>可见日期（起）<input id="f_date_start" placeholder="如 1953-04-12 / 1953-04 / 1953"></label>
+        <label>可见日期（止）<input id="f_date_end" placeholder="同日可留空"></label>
+        <label>版次<input id="f_edition" placeholder="如 3 或 三"></label>
+        <label>正刊 / 副刊
+          <select id="f_section">
+            <option>未知</option><option>正刊</option><option>副刊</option>
+          </select>
+        </label>
+        <label>栏目名<input id="f_column_name" placeholder="如 本市新闻"></label>
+        <label>上接指向<input id="f_cont_from" placeholder="如 上接第3版"></label>
+        <label class="wide">段首短句<textarea id="f_first_phrase" rows="2" placeholder="本页开头可见的一两句原文"></textarea></label>
+        <label class="wide">段尾短句<textarea id="f_last_phrase" rows="2" placeholder="本页结尾可见的一两句原文"></textarea></label>
+        <label>下转指向<input id="f_cont_to" placeholder="如 下转第5版"></label>
+        <label>备注<input id="f_notes" placeholder="刊头残缺、字迹模糊等"></label>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn primary" id="saveCluesBtn" disabled>保存线索</button>
+        <span id="formStatus" class="hint"></span>
+      </div>
+    </form>
+  </section>
+
+  <section id="boardPanel">
+    <h2>排序区（阅读顺序）</h2>
+    <p class="hint">拖动卡片调整顺序；🔒 锁定确认页；橙色「!」表示线索已改、该处接续待复核（点击可复核）。</p>
+    <div id="board"><span class="hint" id="boardEmpty">排序区为空——从页库把页面「＋排序」放进来</span></div>
+    <div id="analysisPanel"></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
