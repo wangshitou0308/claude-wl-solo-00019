@@ -7,6 +7,7 @@
 刷新或重启后进度自动恢复。
 """
 import json
+import math
 import os
 import sqlite3
 import uuid
@@ -55,10 +56,20 @@ CREATE TABLE IF NOT EXISTS undo_log (
     snapshot TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS evidence (
+    page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    field TEXT NOT NULL,
+    x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (page_id, field)
+);
 """
 
 CLUE_FIELDS = ['date_start', 'date_end', 'edition', 'section', 'column_name',
                'first_phrase', 'last_phrase', 'cont_from', 'cont_to', 'notes']
+
+# 可保存证据框的字段：段首、段尾及上接、下转线索
+EVIDENCE_FIELDS = ['first_phrase', 'last_phrase', 'cont_from', 'cont_to']
 
 
 def now():
@@ -89,7 +100,26 @@ def init_db():
 
 
 def fetch_pages(db):
-    return [dict(r) for r in db.execute('SELECT * FROM pages ORDER BY id')]
+    pages = [dict(r) for r in db.execute('SELECT * FROM pages ORDER BY id')]
+    attach_evidence(db, pages)
+    return pages
+
+
+def fetch_evidence_map(db):
+    """读取全部证据框，结构：{page_id: {field: {x,y,w,h}}}（坐标为原图比例）。"""
+    out = {}
+    for r in db.execute('SELECT page_id, field, x, y, w, h FROM evidence'):
+        box = {'x': r['x'], 'y': r['y'], 'w': r['w'], 'h': r['h']}
+        out.setdefault(r['page_id'], {})[r['field']] = box
+    return out
+
+
+def attach_evidence(db, pages):
+    """把证据框挂到各页；未框选的页面维持原响应（不出现 evidence 键）。"""
+    ev = fetch_evidence_map(db)
+    for p in pages:
+        if p['id'] in ev:
+            p['evidence'] = ev[p['id']]
 
 
 def fetch_placements(db):
@@ -178,6 +208,60 @@ def api_update_page(pid):
                 [(now(), x) for x in stale])
         db.commit()
     return jsonify({'ok': True, 'changed': changed, 'stale': stale})
+
+
+@app.put('/api/pages/<int:pid>/evidence/<field>')
+def api_save_evidence(pid, field):
+    """保存（替换）某页某线索字段的证据框。
+
+    坐标一律为原图比例（0~1）；重画时只 UPSERT 该字段一行，旧框自然被替换，
+    其他字段的框不受影响。参数不合法时直接说明原因且不写入。
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    if field not in EVIDENCE_FIELDS:
+        return jsonify({'error': f'字段「{field}」不支持框选证据'}), 400
+    db = get_db()
+    row = db.execute('SELECT 1 FROM pages WHERE id=?', (pid,)).fetchone()
+    if row is None:
+        return jsonify({'error': '页面不存在'}), 404
+    val = data.get('value')
+    if not isinstance(val, str) or not val.strip():
+        return jsonify({'error': '字段为空：请先在该字段填写线索并保存后再框选原文'}), 400
+
+    box, err = parse_box(data.get('box'))
+    if err:
+        return jsonify({'error': err}), 400
+    db.execute(
+        'INSERT INTO evidence (page_id, field, x, y, w, h, updated_at) '
+        'VALUES (?,?,?,?,?,?,?) '
+        'ON CONFLICT(page_id, field) DO UPDATE SET '
+        'x=excluded.x, y=excluded.y, w=excluded.w, h=excluded.h, updated_at=excluded.updated_at',
+        (pid, field, box['x'], box['y'], box['w'], box['h'], now()))
+    db.commit()
+    return jsonify({'ok': True, 'page_id': pid, 'field': field,
+                    'evidence': {field: box}})
+
+
+def parse_box(raw, eps=1e-6):
+    """校验前端换算后的比例框，返回 (box, None) 或 (None, 原因)。"""
+    if not isinstance(raw, dict):
+        return None, '坐标格式不正确：缺少矩形数据'
+    coords = {}
+    for k in ('x', 'y', 'w', 'h'):
+        v = raw.get(k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None, f'坐标 {k} 必须是数字'
+        coords[k] = round(float(v), 6)
+    x, y, w, h = coords['x'], coords['y'], coords['w'], coords['h']
+    if not math.isfinite(x) or not math.isfinite(y) \
+            or not math.isfinite(w) or not math.isfinite(h):
+        return None, '坐标必须是有限数字'
+    if w <= 0 or h <= 0:
+        return None, '矩形宽高必须为正数'
+    if x < -eps or y < -eps or x + w > 1 + eps or y + h > 1 + eps:
+        return None, '坐标越界：矩形必须完全落在原图范围内（0~1）'
+    return {'x': min(max(x, 0.0), 1.0), 'y': min(max(y, 0.0), 1.0),
+            'w': min(w, 1.0), 'h': min(h, 1.0)}, None
 
 
 @app.delete('/api/pages/<int:pid>')
@@ -301,20 +385,30 @@ def api_export():
         p = by_id.get(pl['page_id'])
         if p is None:
             continue
-        reading.append({
+        item = {
             'seq': i + 1, 'page_id': p['id'],
             'source_file': p['orig_name'],
             'stored_file': f"scans/{p['stored_name']}",
             'date_start': p['date_start'], 'date_end': p['date_end'],
             'edition': p['edition'], 'section': p['section'],
             'column_name': p['column_name'],
-            'locked': bool(pl['locked']), 'stale': bool(pl['stale'])})
+            'locked': bool(pl['locked']), 'stale': bool(pl['stale'])}
+        if p.get('evidence'):
+            item['evidence'] = p['evidence']
+        reading.append(item)
     placed_ids = {pl['page_id'] for pl in placements}
+    unplaced = []
+    for p in pages:
+        if p['id'] in placed_ids:
+            continue
+        item = {'page_id': p['id'], 'source_file': p['orig_name']}
+        if p.get('evidence'):
+            item['evidence'] = p['evidence']
+        unplaced.append(item)
     payload = {
         'generated_at': now(),
         'reading_order': reading,
-        'unplaced': [{'page_id': p['id'], 'source_file': p['orig_name']}
-                     for p in pages if p['id'] not in placed_ids],
+        'unplaced': unplaced,
         'links': result['links'],
         'gaps': result['gaps'],
         'contradictions': result['contradictions'],

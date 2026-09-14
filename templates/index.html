@@ -34,16 +34,19 @@
       <button class="btn small" data-zoom="fit">适应窗口</button>
       <button class="btn small" data-zoom="reset">1:1</button>
       <span class="hint">滚轮缩放，按住拖动平移</span>
+      <span id="drawHint" class="draw-hint" style="display:none"></span>
     </div>
     <div id="readerWrap">
       <svg id="readerSvg" xmlns="http://www.w3.org/2000/svg">
         <g id="readerG"><image id="readerImg" href=""/></g>
+        <g id="evidenceLayer"></g>
       </svg>
       <div id="readerEmpty">尚未选择扫描页<br><span class="hint">从左侧页库点击缩略图</span></div>
     </div>
 
     <form id="clueForm">
       <h3>线索登记 <span id="formTitle" class="muted"></span></h3>
+      <p class="hint">段首/段尾/上接/下转四个字段保存后，可点「框选原文」在阅读区拖出证据框，以后点「查看原文」即可回到该页并居中高亮。</p>
       <div class="form-grid">
         <label>可见日期（起）<input id="f_date_start" placeholder="如 1953-04-12 / 1953-04 / 1953"></label>
         <label>可见日期（止）<input id="f_date_end" placeholder="同日可留空"></label>
@@ -76,6 +79,7 @@
 </main>
 
 <div id="toast"></div>
+<script src="{{ url_for('static', filename='geometry.js') }}"></script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

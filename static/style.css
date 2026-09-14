@@ -132,6 +132,61 @@ h3 { font-size: 19px; margin: 12px 0 8px; }
 }
 #readerSvg { width: 100%; height: 100%; display: block; cursor: grab; }
 #readerSvg.panning { cursor: grabbing; }
+#readerSvg.drawing { cursor: crosshair; }
+
+/* ---------- 证据框 ---------- */
+#evidenceLayer { pointer-events: none; }
+.evidence-box {
+  pointer-events: auto;
+  fill: rgba(230, 81, 0, .12);
+  stroke: var(--warn);
+  stroke-width: 2.5;
+  vector-effect: non-scaling-stroke;
+}
+.evidence-first_phrase { stroke: #1565c0; fill: rgba(21, 101, 192, .12); }
+.evidence-last_phrase { stroke: var(--warn); fill: rgba(230, 81, 0, .12); }
+.evidence-cont_from { stroke: #6a1b9a; fill: rgba(106, 27, 154, .12); }
+.evidence-cont_to { stroke: var(--strong); fill: rgba(46, 125, 50, .13); }
+.evidence-box.flash {
+  animation: evidence-pulse .5s ease-in-out 4;
+  stroke-width: 4;
+}
+.evidence-draft {
+  pointer-events: none;
+  fill: rgba(255, 255, 255, .18);
+  stroke: #ffd54f;
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  vector-effect: non-scaling-stroke;
+}
+@keyframes evidence-pulse {
+  0%, 100% { stroke-opacity: 1; fill-opacity: .12; }
+  50% { stroke-opacity: .35; fill-opacity: .35; }
+}
+.draw-hint {
+  color: var(--warn); font-weight: bold; font-size: 15px;
+  background: #fff3e6; border: 1px solid var(--warn);
+  border-radius: 6px; padding: 3px 10px;
+}
+.evidence-tools {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 4px;
+}
+.evidence-btn {
+  font: inherit; font-size: 14px;
+  border-radius: 6px; padding: 2px 10px;
+  background: #fff; cursor: pointer;
+}
+.evidence-btn.draw { border: 1px solid var(--accent); color: var(--accent); }
+.evidence-btn.draw:hover { background: var(--accent-soft); }
+.evidence-btn.draw.active { background: var(--accent); color: #fff; }
+.evidence-btn.view { border: 1px solid var(--strong); color: var(--strong); }
+.evidence-btn.view:hover { background: #e2f2e1; }
+.evidence-btn:disabled { opacity: .45; cursor: not-allowed; }
+.field-msg { font-size: 14px; color: var(--muted); }
+.field-msg.error { color: var(--error); }
+.form-grid label.has-evidence { padding-bottom: 4px; border-bottom: 2px dotted var(--strong); }
+.form-grid label.evidence-field-active { background: #fff8ed; border-radius: 6px; }
 #readerEmpty {
   position: absolute; inset: 0;
   display: flex; flex-direction: column; gap: 6px;

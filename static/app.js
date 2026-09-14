@@ -3,6 +3,7 @@
 
 const CLUE_FIELDS = ['date_start', 'date_end', 'edition', 'section', 'column_name',
                      'first_phrase', 'last_phrase', 'cont_from', 'cont_to', 'notes'];
+const EVIDENCE_FIELDS = ['first_phrase', 'last_phrase', 'cont_from', 'cont_to'];
 const CLUE_LABELS = {
   date_start: '日期起', date_end: '日期止', edition: '版次', section: '正/副刊',
   column_name: '栏目名', first_phrase: '段首短句', last_phrase: '段尾短句',
@@ -12,6 +13,8 @@ const CLUE_LABELS = {
 let state = { pages: [], undo_depth: 0 };
 let analysis = null;
 let selectedId = null;
+let loadedStored = null;      // 阅读区当前已加载图像的存储名
+let drawField = null;         // 非 null 时处于证据框选模式（字段名）
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -48,7 +51,14 @@ function lockedIds() {
 
 async function refresh() {
   state = await api('/api/state');
-  if (selectedId && !pageById(selectedId)) { selectedId = null; clearForm(); }
+  if (selectedId && !pageById(selectedId)) {
+    selectedId = null;
+    setDrawMode(null);
+    clearForm();
+  } else {
+    syncEvidenceControls();
+    renderEvidenceLayer();
+  }
   renderThumbs();
   renderBoard();
   renderUndo();
@@ -135,6 +145,7 @@ async function deletePage(p) {
 /* ================= 阅读区（SVG 缩放/平移） ================= */
 
 const svg = $('#readerSvg'), readerG = $('#readerG'), readerImg = $('#readerImg');
+const evidenceLayer = $('#evidenceLayer');   // 无变换覆盖组：坐标即视口像素
 const view = { scale: 1, tx: 0, ty: 0 };
 
 function applyView() {
@@ -166,37 +177,279 @@ function resetView() {
 }
 
 function setImage(url) {
-  const probe = new Image();
-  probe.onload = () => {
-    readerImg.setAttribute('href', url);
-    readerImg.setAttribute('width', probe.naturalWidth);
-    readerImg.setAttribute('height', probe.naturalHeight);
-    $('#readerEmpty').style.display = 'none';
-    fitView();
-  };
-  probe.src = url;
+  return new Promise(resolve => {
+    const probe = new Image();
+    probe.onload = () => {
+      readerImg.setAttribute('href', url);
+      readerImg.setAttribute('width', probe.naturalWidth);
+      readerImg.setAttribute('height', probe.naturalHeight);
+      $('#readerEmpty').style.display = 'none';
+      fitView();
+      renderEvidenceLayer();
+      resolve(probe);
+    };
+    probe.onerror = () => resolve(null);
+    probe.src = url;
+  });
 }
 
 svg.addEventListener('wheel', e => {
   e.preventDefault();
   const r = svg.getBoundingClientRect();
   zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.25 : 0.8);
+  renderEvidenceLayer();   // 证据框以像素矩形绘制在 readerG 之外，缩放后重画
 }, { passive: false });
 
-let panning = null;
+/* 同一组指针事件承担两种交互：框选模式拖矩形，否则平移画面 */
+let drag = null;
+let drawRectEl = null;
+const NS = 'http://www.w3.org/2000/svg';
+
+function svgPoint(e) {
+  const r = svg.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
 svg.addEventListener('pointerdown', e => {
-  panning = { x: e.clientX, y: e.clientY };
+  const pt = svgPoint(e);
+  if (drawField) {
+    drag = { kind: 'draw', x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
+    drawRectEl = document.createElementNS(NS, 'rect');
+    drawRectEl.setAttribute('class', 'evidence-draft');
+    evidenceLayer.appendChild(drawRectEl);
+  } else {
+    drag = { kind: 'pan', x: e.clientX, y: e.clientY };
+    svg.classList.add('panning');
+  }
   svg.setPointerCapture(e.pointerId);
-  svg.classList.add('panning');
 });
 svg.addEventListener('pointermove', e => {
-  if (!panning) return;
-  view.tx += e.clientX - panning.x;
-  view.ty += e.clientY - panning.y;
-  panning = { x: e.clientX, y: e.clientY };
-  applyView();
+  if (!drag) return;
+  if (drag.kind === 'pan') {
+    view.tx += e.clientX - drag.x;
+    view.ty += e.clientY - drag.y;
+    drag = { kind: 'pan', x: e.clientX, y: e.clientY };
+    applyView();
+    renderEvidenceLayer();
+    return;
+  }
+  const pt = svgPoint(e);
+  drag.x1 = pt.x; drag.y1 = pt.y;
+  const x = Math.min(drag.x0, pt.x), y = Math.min(drag.y0, pt.y);
+  drawRectEl.setAttribute('x', x);
+  drawRectEl.setAttribute('y', y);
+  drawRectEl.setAttribute('width', Math.abs(pt.x - drag.x0));
+  drawRectEl.setAttribute('height', Math.abs(pt.y - drag.y0));
 });
-svg.addEventListener('pointerup', () => { panning = null; svg.classList.remove('panning'); });
+svg.addEventListener('pointerup', () => {
+  if (!drag) return;
+  if (drag.kind === 'draw') finishDraw(drag);
+  drag = null;
+  svg.classList.remove('panning');
+  if (drawRectEl) { drawRectEl.remove(); drawRectEl = null; }
+});
+
+async function finishDraw(d) {
+  const field = drawField;
+  const p = pageById(selectedId);
+  const imgW = +readerImg.getAttribute('width') || 0;
+  const imgH = +readerImg.getAttribute('height') || 0;
+  setDrawMode(null);
+  if (!p || !imgW || !imgH) return;
+  const moved = Math.max(Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
+  if (moved <= 3) {
+    fieldMsg(field, '拖选范围太小，请在原图上拖出一个矩形', 'error');
+    return;
+  }
+  const box = EvidenceGeom.proportionRect(
+    { x: d.x0, y: d.y0 }, { x: d.x1, y: d.y1 }, view, imgW, imgH);
+  const err = EvidenceGeom.validateBox(box, $(`#f_${field}`).value);
+  if (err) { fieldMsg(field, err, 'error'); return; }
+  await saveEvidence(p.id, field, box, $(`#f_${field}`).value.trim());
+}
+
+/* ---------------- 证据框：字段旁入口、绘制、查看原文 ---------------- */
+
+function initEvidenceControls() {
+  for (const f of EVIDENCE_FIELDS) {
+    const input = $(`#f_${f}`);
+    const wrap = document.createElement('span');
+    wrap.className = 'evidence-tools';
+    const drawBtn = document.createElement('button');
+    drawBtn.type = 'button';
+    drawBtn.className = 'evidence-btn draw';
+    drawBtn.textContent = drawField === f ? '取消框选' : '框选原文';
+    drawBtn.onclick = ev => {
+      ev.preventDefault();
+      if (drawField === f) setDrawMode(null);
+      else enterDrawModeCheck(f);
+    };
+    const viewBtn = document.createElement('button');
+    viewBtn.type = 'button';
+    viewBtn.className = 'evidence-btn view';
+    viewBtn.dataset.evidenceView = f;
+    viewBtn.textContent = '查看原文';
+    viewBtn.onclick = ev => { ev.preventDefault(); openEvidence(selectedId, f); };
+    const msg = document.createElement('span');
+    msg.className = 'field-msg';
+    msg.dataset.fieldMsg = f;
+    wrap.append(drawBtn, viewBtn, msg);
+    input.closest('label').appendChild(wrap);
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && drawField) setDrawMode(null);
+  });
+}
+
+function setDrawMode(field) {
+  drawField = field;
+  svg.classList.toggle('drawing', !!field);
+  syncEvidenceControls();
+  if (field) {
+    fieldMsg(field, `请在阅读区拖出「${CLUE_LABELS[field]}」对应的原文范围（Esc 取消）`);
+  } else {
+    $('#drawHint').style.display = 'none';
+  }
+}
+
+function enterDrawModeCheck(field) {
+  const p = pageById(selectedId);
+  if (!p) return;
+  const cur = $(`#f_${field}`).value.trim();
+  if (!cur) {
+    fieldMsg(field, '字段为空：请先填写线索并「保存线索」，再框选原文', 'error');
+    return;
+  }
+  if (cur !== (p[field] || '')) {
+    fieldMsg(field, '字段有未保存的修改：请先「保存线索」，再框选原文', 'error');
+    return;
+  }
+  setDrawMode(field);
+}
+
+function syncEvidenceControls() {
+  const p = pageById(selectedId);
+  for (const f of EVIDENCE_FIELDS) {
+    const wrap = $(`[data-field-msg="${f}"]`);
+    const label = $(`#f_${f}`).closest('label');
+    const drawBtn = $('.evidence-btn.draw', label);
+    const viewBtn = $('.evidence-btn.view', label);
+    const has = !!(p && p.evidence && p.evidence[f]);
+    const filled = !!(p && (p[f] || '').trim());
+    drawBtn.disabled = !p;
+    drawBtn.classList.toggle('active', drawField === f);
+    drawBtn.textContent = drawField === f ? '取消框选' : '框选原文';
+    viewBtn.style.display = has ? '' : 'none';
+    label.classList.toggle('has-evidence', has);
+    label.classList.toggle('evidence-field-active', drawField === f);
+    if (!drawField && (!filled || has)) wrap.textContent = '';
+  }
+  if (drawField) {
+    $('#drawHint').style.display = '';
+    $('#drawHint').textContent =
+      `框选模式：正在为「${CLUE_LABELS[drawField]}」拖选原文证据，松开即保存（Esc 取消）`;
+  }
+}
+
+function fieldMsg(field, text, kind = 'info') {
+  const el = $(`[data-field-msg="${field}"]`);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'field-msg' + (kind === 'error' ? ' error' : '');
+}
+
+async function saveEvidence(pid, field, box, value) {
+  try {
+    const res = await api(`/api/pages/${pid}/evidence/${field}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ box, value })
+    });
+    const p = pageById(pid);
+    if (p) {
+      p.evidence = Object.assign({}, p.evidence, res.evidence);  // 只替换该字段旧框
+    }
+    renderEvidenceLayer();
+    syncEvidenceControls();
+    fieldMsg(field, '证据框已保存（旧框已替换）');
+    toast(`已保存 #${pid}「${CLUE_LABELS[field]}」的原文证据框`);
+  } catch (err) {
+    fieldMsg(field, err.message, 'error');
+    toast(err.message, 'error');
+  }
+}
+
+function imgSize() {
+  return { w: +readerImg.getAttribute('width') || 0,
+           h: +readerImg.getAttribute('height') || 0 };
+}
+
+function renderEvidenceLayer(flashField = null) {
+  const layer = $('#evidenceLayer');
+  layer.innerHTML = '';
+  const p = pageById(selectedId);
+  const { w: imgW, h: imgH } = imgSize();
+  if (!p || !p.evidence || !imgW || !imgH || loadedStored !== p.stored_name) return;
+  for (const [field, box] of Object.entries(p.evidence)) {
+    const r = EvidenceGeom.toScreenRect(box, view, imgW, imgH);
+    const el = document.createElementNS(NS, 'rect');
+    el.setAttribute('class',
+      `evidence-box evidence-${field}` + (field === flashField ? ' flash' : ''));
+    el.setAttribute('x', r.x); el.setAttribute('y', r.y);
+    el.setAttribute('width', Math.max(r.w, 2));
+    el.setAttribute('height', Math.max(r.h, 2));
+    el.dataset.field = field;
+    el.style.cursor = 'pointer';
+    el.appendChild(Object.assign(document.createElementNS(NS, 'title'),
+      { textContent: `${CLUE_LABELS[field]}原文证据` }));
+    el.addEventListener('pointerdown', ev => ev.stopPropagation());
+    el.addEventListener('click', ev => {
+      ev.stopPropagation();
+      flashFieldOnce(field);
+      fieldMsg(field, `此框为「${CLUE_LABELS[field]}」的原文证据；可重新「框选原文」替换`);
+    });
+    layer.appendChild(el);
+  }
+}
+
+function flashFieldOnce(field) {
+  renderEvidenceLayer(field);
+  setTimeout(() => {
+    const cur = $(`.evidence-box.${'evidence-' + field}.flash`);
+    if (cur) cur.classList.remove('flash');
+  }, 1600);
+}
+
+async function openEvidence(pid, field) {
+  const p = pageById(pid);
+  if (!p) { toast('页面不存在', 'error'); return; }
+  setDrawMode(null);
+  const box = p.evidence && p.evidence[field];
+  if (!box) {
+    toast(`#${pid} 的「${CLUE_LABELS[field]}」还没有证据框`, 'error');
+    return;
+  }
+  if (selectedId !== pid) {
+    selectedId = pid;
+    await selectPage(pid, { keepView: false });
+  }
+  history.replaceState(null, '', `#p=${pid}&f=${field}`);
+  centerOnBox(box, field);
+}
+
+function centerOnBox(box, field) {
+  const { w: imgW, h: imgH } = imgSize();
+  if (!imgW || !imgH) return;
+  const r = svg.getBoundingClientRect();
+  Object.assign(view, EvidenceGeom.centerView(box, imgW, imgH, r.width, r.height));
+  applyView();
+  renderEvidenceLayer(field);
+  $('#readerPanel').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  setTimeout(() => {
+    const cur = $(`.evidence-box.evidence-${field}.flash`);
+    if (cur) cur.classList.remove('flash');
+  }, 2000);
+}
 
 $$('.reader-toolbar [data-zoom]').forEach(btn => {
   btn.onclick = () => {
@@ -206,29 +459,40 @@ $$('.reader-toolbar [data-zoom]').forEach(btn => {
     else if (mode === 'out') zoomAt(r.width / 2, r.height / 2, 1 / 1.3);
     else if (mode === 'fit') fitView();
     else resetView();
+    renderEvidenceLayer();
   };
 });
 
 /* ================= 线索表单 ================= */
 
-function selectPage(id) {
+async function selectPage(id, opts = {}) {
   selectedId = id;
+  setDrawMode(null);
   const p = pageById(id);
   if (!p) return;
-  setImage(`/scans/${p.stored_name}`);
+  if (loadedStored !== p.stored_name || opts.keepView === false) {
+    loadedStored = p.stored_name;
+    await setImage(`/scans/${p.stored_name}`);
+  }
   for (const f of CLUE_FIELDS) $(`#f_${f}`).value = p[f] || '';
   $('#formTitle').textContent = `—— ${pageLabel(p)}`;
   $('#saveCluesBtn').disabled = false;
   $('#formStatus').textContent = '';
+  for (const f of EVIDENCE_FIELDS) fieldMsg(f, '');
+  syncEvidenceControls();
+  renderEvidenceLayer();
   renderThumbs();
 }
 
 function clearForm() {
+  setDrawMode(null);
+  loadedStored = null;
   for (const f of CLUE_FIELDS) $(`#f_${f}`).value = '';
   $('#formTitle').textContent = '';
   $('#saveCluesBtn').disabled = true;
   readerImg.setAttribute('href', '');
   $('#readerEmpty').style.display = 'flex';
+  renderEvidenceLayer();
 }
 
 $('#clueForm').addEventListener('submit', async e => {
@@ -253,6 +517,7 @@ $('#clueForm').addEventListener('submit', async e => {
     }
     await refresh();
     await refreshAnalysis();
+    for (const f of EVIDENCE_FIELDS) fieldMsg(f, '');  // 线索已保存，清除“先保存线索”等提示
   } catch (err) { toast(err.message, 'error'); }
 });
 
@@ -438,8 +703,19 @@ function renderAnalysis() {
   for (const c of analysis.contradictions) {
     const div = document.createElement('div');
     div.className = `card-msg ${c.severity === 'warning' ? 'warning' : ''}`;
-    const clueTags = (c.clues || []).map(f =>
-      `<span class="clue-tag">${CLUE_LABELS[f] || f}</span>`).join('');
+    const clueTags = (c.clues || []).map(f => {
+      let tag = `<span class="clue-tag">${CLUE_LABELS[f] || f}</span>`;
+      // 已框选原文的线索字段：标签旁出现「查看原文」
+      if (EVIDENCE_FIELDS.includes(f)) {
+        for (const pid of c.pages) {
+          const p = pageById(pid);
+          if (p && p.evidence && p.evidence[f]) {
+            tag += ` <button class="locate-btn evidence-link" data-pid="${pid}" data-field="${f}">查看原文（#${pid}）</button>`;
+          }
+        }
+      }
+      return tag;
+    }).join('');
     const evidence = (c.evidence || []).map(e => `<div class="sub">依据：${escapeHtml(e)}</div>`).join('');
     const locates = c.pages.map(pid =>
       `<button class="locate-btn" data-pid="${pid}">定位 #${pid}</button>`).join('');
@@ -475,6 +751,9 @@ function renderAnalysis() {
       selectPage(+btn.dataset.pid);
       $('#readerPanel').scrollIntoView({ behavior: 'smooth' });
     };
+  });
+  $$('.evidence-link', panel).forEach(btn => {
+    btn.onclick = () => openEvidence(+btn.dataset.pid, btn.dataset.field);
   });
 }
 
@@ -596,13 +875,39 @@ function escapeHtml(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/* ================= 深链：#p=<页id>&f=<字段> → 打开页面并居中高亮证据框 ================= */
+
+function parseHash() {
+  const m = /p=(\d+)(?:&f=(\w+))?/.exec(location.hash || '');
+  if (!m) return null;
+  return { pid: +m[1], field: m[2] || null };
+}
+
+async function handleHash() {
+  const h = parseHash();
+  if (!h) return;
+  if (!EVIDENCE_FIELDS.includes(h.field)) return;
+  await openEvidence(h.pid, h.field);
+}
+
 /* ================= 启动 ================= */
 
 (async () => {
   try {
+    initEvidenceControls();
     await refresh();
     await refreshAnalysis();
+    await handleHash();
   } catch (err) {
     toast('初始化失败：' + err.message, 'error');
   }
 })();
+
+window.addEventListener('hashchange', handleHash);
+
+/* 供前端测试读取/驱动内部状态（浏览器中无副作用） */
+window.appHooks = {
+  selectPage, openEvidence,
+  get view() { return view; },
+  get selectedId() { return selectedId; }
+};
